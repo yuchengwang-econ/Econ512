@@ -73,21 +73,24 @@ df$share_price1_derivative <- -1 * alpha_hat * df$market_share * df$share_1
 df$share_price1_elasticity <- -1 * alpha_hat * df$price_1 * df$share_1
 
 ## Derive Jacobian matrix of price derivatives
-jacobian_derivative <- function(alpha, date, share){
+jacobian_derivative <- function(alpha, data, date){
+  # Compute nest shares and nest share ratios
+  share <- data[data$t == date, "market_share"][["market_share"]]
   jacobian <- matrix(0, nrow = J_product, ncol = J_product)
   for (i in 1:J_product){
     for (j in 1:J_product){
       if (i == j){
-        jacobian[i,j] <- alpha * df[df$product_ID == i & df$t == date, share] * (1-df[df$product_ID == i & df$t == date, share])
+        jacobian[i,j] <- alpha * share[i] * (1-share[i])
       }
       else{
-        jacobian[i,j] <- -1 * alpha * df[df$product_ID == i & df$t == date, share] * df[df$product_ID == j & df$t == date, share]
+        jacobian[i,j] <- -1 * alpha * share[i] * share[j]
       }
     }
   }
   return(jacobian)
 }
-print(jacobian_derivative(alpha_hat,100,"market_share"))
+jacobian <- jacobian_derivative(alpha_hat,df,100)
+print(round(jacobian, digits=3))
 
 
 
@@ -147,7 +150,7 @@ mean_elasticity <- df %>%
 df <- df %>%
   group_by(t) %>%
   mutate(market_share_1 = market_share[product_ID == 1]) %>% ## Generates s_1t
-  mutate(nest_share_1 = nest_share_ratio[product_ID == 1])) %>% ## Generates s_1t|g(1)
+  mutate(nest_share_1 = nest_share_ratio[product_ID == 1]) %>% ## Generates s_1t|g(1)
   mutate(price_1 = price[product_ID == 1]) %>%  ## Generates p_1t
   ungroup()
 
@@ -163,22 +166,93 @@ mean_1_elasticity <- df %>%
   summarize(mean_value = mean(share_price1_elasticity))
 
 ## Find Jacobian matrix
-jacobian_derivative_nest <- function(alpha, sigma, date, share, nest){
+jacobian_derivative_nest <- function(alpha, sigma, data, date){
+  # Compute nest shares and nest share ratios
+  nest <- data[data$t == date, "nest"][["nest"]]
+  share <- data[data$t == date, "market_share"][["market_share"]]
+  nest_share <- sapply(nest, function(x) sum(share[nest == x]))
+  nest_share_ratio <- share / nest_share
   jacobian <- matrix(0, nrow = J_product, ncol = J_product)
   for (i in 1:J_product){
     for (j in 1:J_product){
       if (i == j){
-        jacobian[i,j] <-
+        jacobian[i,j] <- alpha_hat_nest / (1-sigma_hat_nest) * share[i] * (1-nest_share_ratio[i]) +
+          alpha_hat_nest * share[i] * nest_share_ratio[i] * (1-nest_share[i])
       }
-      else if (df[df$product_ID == i & df$t == 1, nest] == df[df$product_ID == j & df$t == 1, nest]){ ## i,j in the same nest
-        jacobian[i,j] <-
+      else if (nest[i] == nest[j]){ ## i,j in the same nest
+        jacobian[i,j] <- -1 * alpha_hat_nest / (1-sigma_hat_nest) * nest_share_ratio[j] * share[i] +
+          alpha_hat_nest * nest_share_ratio[j] * share[i] * (1-nest_share[i])
       }
       else{ ## i,j not in the same nest
-        jacobian[i,j] <-
+        jacobian[i,j] <- -1 * alpha_hat_nest * share[i] * share[j]
       }
     }
   }
   return(jacobian)
 }
-print(jacobian_derivative(alpha_hat,100,"market_share"))
+jacobian_nest <- jacobian_derivative_nest(alpha_hat_nest,sigma_hat_nest,df,100)
+print(round(jacobian_nest, digits=3))
+
+
+########################
+## Add Supply Side
+########################
+
+## Obtain estimates of alpha and sigma, repeat codes in Question 2(a)
+setwd("C:/Users/Yucheng Wang/Desktop/Study/Econ543 IO/PS1")
+df = read.csv("product_data.csv", header = TRUE, sep = ",")
+T_length = 100
+J_product = 10
+dummy_vars <- model.matrix(~ nest - 1, data = df)
+df <- cbind(df, dummy_vars)
+total_share = aggregate(market_share ~ t, data = df, FUN = sum)
+outside_share = rep(1,T_length) - total_share[,2]
+df$log_share_ratio <- log(df$market_share)-log(rep(outside_share, each = J_product))
+J_nest = 5
+nest_total_share = aggregate(market_share ~ nest + t, data = df, FUN = sum)
+df$nest_share <- rep(nest_total_share[,3], each = J_nest)
+df$nest_share_ratio <- df$market_share / df$nest_share
+df$log_nest_share_ratio <- log(df$nest_share_ratio)
+df$mean_sugar_others_nest <- (rep(aggregate(sugar ~ nest + t, data = df, FUN = sum)[,3], each = J_nest) - df$sugar) / (J_nest - 1)
+df$mean_caffeine_others_nest <- (rep(aggregate(caffeine ~ nest + t, data = df, FUN = sum)[,3], each = J_nest) - df$caffeine) / (J_nest - 1)
+nest_model <- ivreg(df$log_share_ratio ~ df$price + df$sugar + df$caffeine + df$nestDiet + df$nestRegular + df$log_nest_share_ratio - 1 
+                    | df$caffeine_extract_price + df$corn_syrup_price + df$sugar + df$caffeine + df$nestDiet + df$nestRegular + df$mean_sugar_others_nest 
+                    + df$mean_caffeine_others_nest)
+alpha_hat_nest <- nest_model$coefficients[1]
+sigma_hat_nest <- nest_model$coefficients[6]
+
+## Obtain the Jacobian matrix as in Question 2(e)
+jacobian_derivative_nest <- function(alpha, sigma, data, date){
+  # Compute nest shares and nest share ratios
+  nest <- data[data$t == date, "nest"][["nest"]]
+  share <- data[data$t == date, "market_share"][["market_share"]]
+  nest_share <- sapply(nest, function(x) sum(share[nest == x]))
+  nest_share_ratio <- share / nest_share
+  jacobian <- matrix(0, nrow = J_product, ncol = J_product)
+  for (i in 1:J_product){
+    for (j in 1:J_product){
+      if (i == j){
+        jacobian[i,j] <- alpha_hat_nest / (1-sigma_hat_nest) * share[i] * (1-nest_share_ratio[i]) +
+          alpha_hat_nest * share[i] * nest_share_ratio[i] * (1-nest_share[i])
+      }
+      else if (nest[i] == nest[j]){ ## i,j in the same nest
+        jacobian[i,j] <- -1 * alpha_hat_nest / (1-sigma_hat_nest) * nest_share_ratio[j] * share[i] +
+          alpha_hat_nest * nest_share_ratio[j] * share[i] * (1-nest_share[i])
+      }
+      else{ ## i,j not in the same nest
+        jacobian[i,j] <- -1 * alpha_hat_nest * share[i] * share[j]
+      }
+    }
+  }
+  return(jacobian)
+}
+
+## Estimate marginal costs
+df$marginal_cost <- rep(0, T_length * J_product)
+for (tau in 1:T_length){
+  for (j in 1:J_product){
+    df[df$t == tau & df$product_ID == j, "marginal_cost"] <- df[df$t == tau & df$product_ID == j, "price"] 
+    + df[df$t == tau & df$product_ID == j, "market_share"] / jacobian_derivative_nest(alpha_hat_nest, sigma_hat_nest, df, tau)[j,j]
+  }
+}
 
