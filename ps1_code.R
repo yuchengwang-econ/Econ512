@@ -41,28 +41,16 @@ initial_theta <- c(0,0,0,0,0)
 gmm_model <- gmm(moment_function, x = df, t0 = initial_theta)
 summary(gmm_model)
 
-## Assuming endogeneity of price, use instruments and do GMM again
-moment_function_iv <- function(theta, data){
-  Y <- data$log_share_ratio
-  X1 <- data$price
-  X2 <- data$sugar
-  X3 <- data$caffeine
-  X4 <- data$nestDiet
-  X5 <- data$nestRegular
-  X6 <- data$caffeine_extract_price
-  X7 <- data$corn_syrup_price
-  X <- cbind(X1, X2, X3, X4, X5)
-  X_exo <- cbind(X2, X3, X4, X5, X6, X7)
-  residuals <- c(Y - X %*% theta)
-  moment_conditions <- residuals * X_exo
-  return(moment_conditions)
-}
-gmm_iv_model <- gmm(moment_function_iv, x = df, t0 = initial_theta)
-gmm_coef = gmm_iv_model$coefficients
+## Assuming endogeneity of price, use instruments and do 2SLS
+## install package "AER"
+library(AER)
+iv_model <- ivreg(df$log_share_ratio ~ df$price + df$sugar + df$caffeine + df$nestDiet + df$nestRegular - 1 | df$caffeine_extract_price + 
+                    df$corn_syrup_price + df$sugar + df$caffeine + df$nestDiet + df$nestRegular)
+alpha_hat <- iv_model$coefficients[1]
 
 ## Compute share-own-price derivatives and share-own-price elasticities
-df$share_price_derivative <- gmm_coef[1] * df$market_share * (1-df$market_share)
-df$share_price_elasticity <- gmm_coef[1] * (1-df$market_share) * df$price
+df$share_price_derivative <- alpha_hat * df$market_share * (1-df$market_share)
+df$share_price_elasticity <- alpha_hat * (1-df$market_share) * df$price
 
 ## Find mean elasticity of Diet and Regular products
 library(dplyr)
@@ -81,8 +69,8 @@ df <- df %>%
   right_join(market_share_1, by = "t") %>%
   right_join(price_1, by = "t")
 
-df$share_price1_derivative <- -1 * gmm_coef[1] * df$market_share * df$share_1
-df$share_price1_elasticity <- -1 * gmm_coef[1] * df$price_1 * df$share_1
+df$share_price1_derivative <- -1 * alpha_hat * df$market_share * df$share_1
+df$share_price1_elasticity <- -1 * alpha_hat * df$price_1 * df$share_1
 
 ## Derive Jacobian matrix of price derivatives
 jacobian_derivative <- function(alpha, date, share){
@@ -99,48 +87,98 @@ jacobian_derivative <- function(alpha, date, share){
   }
   return(jacobian)
 }
-print(jacobian_derivative(gmm_coef[1],100,"market_share"))
-print(jacobian_derivative(ols_coef[2],100,"market_share"))
+print(jacobian_derivative(alpha_hat,100,"market_share"))
+
+
 
 
 #######################
 ## Nested logit
 #######################
 
+## Extract data
+setwd("C:/Users/Yucheng Wang/Desktop/Study/Econ543 IO/PS1")
+df = read.csv("product_data.csv", header = TRUE, sep = ",")
+T_length = 100
+J_product = 10
+
+## Convert to Dummies
+dummy_vars <- model.matrix(~ nest - 1, data = df)
+df <- cbind(df, dummy_vars)
+
+## Compute outside share, Save log of share ratio (LHS variable)
+total_share = aggregate(market_share ~ t, data = df, FUN = sum)
+outside_share = rep(1,T_length) - total_share[,2]
+df$log_share_ratio <- log(df$market_share)-log(rep(outside_share, each = J_product))
+
 J_nest = 5
 
 ## Compute and add nest shares & within-nest market shares
 nest_total_share = aggregate(market_share ~ nest + t, data = df, FUN = sum)
 df$nest_share <- rep(nest_total_share[,3], each = J_nest)
-df$log_nest_share_ratio <- log(df$market_share) - log(df$nest_share)
+df$nest_share_ratio <- df$market_share / df$nest_share
+df$log_nest_share_ratio <- log(df$nest_share_ratio)
+
+## Compute average ch. of other products in same nest
+df$mean_sugar_others_nest <- (rep(aggregate(sugar ~ nest + t, data = df, FUN = sum)[,3], each = J_nest) - df$sugar) / (J_nest - 1)
+df$mean_caffeine_others_nest <- (rep(aggregate(caffeine ~ nest + t, data = df, FUN = sum)[,3], each = J_nest) - df$caffeine) / (J_nest - 1)
 
 ## OLS estimation
 ols_model <- lm(log_share_ratio ~ price + sugar + caffeine + nestDiet + nestRegular + log_nest_share_ratio - 1, data = df) # No intercept
 
+## 2SLS estimation
+nest_model <- ivreg(df$log_share_ratio ~ df$price + df$sugar + df$caffeine + df$nestDiet + df$nestRegular + df$log_nest_share_ratio - 1 
+                    | df$caffeine_extract_price + df$corn_syrup_price + df$sugar + df$caffeine + df$nestDiet + df$nestRegular + df$mean_sugar_others_nest 
+                    + df$mean_caffeine_others_nest)
+alpha_hat_nest <- nest_model$coefficients[1]
+sigma_hat_nest <- nest_model$coefficients[6]
 
-## GMM estimation
-moment_function_nest <- function(theta, data){
-  Y <- data$log_share_ratio
-  X1 <- data$price
-  X2 <- data$sugar
-  X3 <- data$caffeine
-  X4 <- data$nestDiet
-  X5 <- data$nestRegular
-  X6 <- data$caffeine_extract_price
-  X7 <- data$corn_syrup_price
-  X8 <- data$log_nest_share_ratio
-  X <- cbind(X1, X2, X3, X4, X5, X8)
-  X_exo <- cbind(X2, X3, X4, X5, X6, X7)
-  residuals <- c(Y - X %*% theta)
-  moment_conditions <- residuals * X_exo
-  return(moment_conditions)
+## Compute share-price derivatives and elasticities
+df$share_price_derivative <- alpha_hat_nest / (1-sigma_hat_nest) * df$market_share * (1-exp(df$log_nest_share_ratio)) + alpha_hat_nest * df$market_share * exp(df$log_nest_share_ratio) *(1-df$nest_share)
+df$share_price_elasticity <- alpha_hat_nest / (1-sigma_hat_nest) * df$price * (1-exp(df$log_nest_share_ratio)) + alpha_hat_nest * df$price * exp(df$log_nest_share_ratio) *(1-df$nest_share)
+
+## Find mean elasticity of Diet and Regular products
+library(dplyr)
+mean_elasticity <- df %>%
+  group_by(nest) %>%
+  summarize(mean_value = mean(share_price_elasticity))
+
+## Generate new variables about product 1
+df <- df %>%
+  group_by(t) %>%
+  mutate(market_share_1 = market_share[product_ID == 1]) %>% ## Generates s_1t
+  mutate(nest_share_1 = nest_share_ratio[product_ID == 1])) %>% ## Generates s_1t|g(1)
+  mutate(price_1 = price[product_ID == 1]) %>%  ## Generates p_1t
+  ungroup()
+
+## Compute share-1-price derivatives and elasticities
+df$share_price1_derivative <- (df$nestDiet==1)*(-1 * alpha_hat_nest / (1-sigma_hat_nest) * df$market_share * df$nest_share_1 +
+  alpha_hat_nest * df$nest_share_ratio * df$market_share_1 * (1-df$nest_share)) +
+  (df$nestRegular==1)*(-1 * alpha_hat_nest * df$market_share * df$market_share_1)
+df$share_price1_elasticity <- df$share_price1_derivative * df$price_1 / df$market_share
+
+## Find mean elasticity of Diet and Regular products
+mean_1_elasticity <- df %>%
+  group_by(nest) %>%
+  summarize(mean_value = mean(share_price1_elasticity))
+
+## Find Jacobian matrix
+jacobian_derivative_nest <- function(alpha, sigma, date, share, nest){
+  jacobian <- matrix(0, nrow = J_product, ncol = J_product)
+  for (i in 1:J_product){
+    for (j in 1:J_product){
+      if (i == j){
+        jacobian[i,j] <-
+      }
+      else if (df[df$product_ID == i & df$t == 1, nest] == df[df$product_ID == j & df$t == 1, nest]){ ## i,j in the same nest
+        jacobian[i,j] <-
+      }
+      else{ ## i,j not in the same nest
+        jacobian[i,j] <-
+      }
+    }
+  }
+  return(jacobian)
 }
-
-initial_theta = c(0,0,0,0,0,0)
-gmm_nest_model <- gmm(moment_function_nest, x = df, t0 = initial_theta)
-gmm_nest_coef = gmm_nest_model$coefficients
-
-## Compute share-price derivatives
-df$share_price_derivative <- gmm_nest_coef[1] / (1-gmm_nest_coef[6])
-
+print(jacobian_derivative(alpha_hat,100,"market_share"))
 
