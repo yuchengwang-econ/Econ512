@@ -131,8 +131,7 @@ ols_model <- lm(log_share_ratio ~ price + sugar + caffeine + nestDiet + nestRegu
 
 ## 2SLS estimation
 nest_model <- ivreg(df$log_share_ratio ~ df$price + df$sugar + df$caffeine + df$nestDiet + df$nestRegular + df$log_nest_share_ratio - 1 
-                    | df$caffeine_extract_price + df$corn_syrup_price + df$sugar + df$caffeine + df$nestDiet + df$nestRegular + df$mean_sugar_others_nest 
-                    + df$mean_caffeine_others_nest)
+                    | df$caffeine_extract_price + df$corn_syrup_price + df$sugar + df$caffeine + df$nestDiet + df$nestRegular + df$mean_sugar_others_nest + df$mean_caffeine_others_nest)
 alpha_hat_nest <- nest_model$coefficients[1]
 sigma_hat_nest <- nest_model$coefficients[6]
 
@@ -155,9 +154,7 @@ df <- df %>%
   ungroup()
 
 ## Compute share-1-price derivatives and elasticities
-df$share_price1_derivative <- (df$nestDiet==1)*(-1 * alpha_hat_nest / (1-sigma_hat_nest) * df$market_share * df$nest_share_1 +
-  alpha_hat_nest * df$nest_share_ratio * df$market_share_1 * (1-df$nest_share)) +
-  (df$nestRegular==1)*(-1 * alpha_hat_nest * df$market_share * df$market_share_1)
+df$share_price1_derivative <- (df$nestDiet==1)*(-1 * alpha_hat_nest / (1-sigma_hat_nest) * df$market_share * df$nest_share_1 + alpha_hat_nest * df$nest_share_ratio * df$market_share_1 * (1-df$nest_share)) + (df$nestRegular==1)*(-1 * alpha_hat_nest * df$market_share * df$market_share_1)
 df$share_price1_elasticity <- df$share_price1_derivative * df$price_1 / df$market_share
 
 ## Find mean elasticity of Diet and Regular products
@@ -176,12 +173,10 @@ jacobian_derivative_nest <- function(alpha, sigma, data, date){
   for (i in 1:J_product){
     for (j in 1:J_product){
       if (i == j){
-        jacobian[i,j] <- alpha_hat_nest / (1-sigma_hat_nest) * share[i] * (1-nest_share_ratio[i]) +
-          alpha_hat_nest * share[i] * nest_share_ratio[i] * (1-nest_share[i])
+        jacobian[i,j] <- alpha_hat_nest / (1-sigma_hat_nest) * share[i] * (1-nest_share_ratio[i]) + alpha_hat_nest * share[i] * nest_share_ratio[i] * (1-nest_share[i])
       }
       else if (nest[i] == nest[j]){ ## i,j in the same nest
-        jacobian[i,j] <- -1 * alpha_hat_nest / (1-sigma_hat_nest) * nest_share_ratio[j] * share[i] +
-          alpha_hat_nest * nest_share_ratio[j] * share[i] * (1-nest_share[i])
+        jacobian[i,j] <- -1 * alpha_hat_nest / (1-sigma_hat_nest) * nest_share_ratio[j] * share[i] + alpha_hat_nest * nest_share_ratio[j] * share[i] * (1-nest_share[i])
       }
       else{ ## i,j not in the same nest
         jacobian[i,j] <- -1 * alpha_hat_nest * share[i] * share[j]
@@ -224,8 +219,8 @@ sigma_hat_nest <- nest_model$coefficients[6]
 ## Obtain the Jacobian matrix as in Question 2(e)
 jacobian_derivative_nest <- function(alpha, sigma, data, date){
   # Compute nest shares and nest share ratios
-  nest <- data[data$t == date, "nest"][["nest"]]
-  share <- data[data$t == date, "market_share"][["market_share"]]
+  nest <- data[data$t == date, "nest"]
+  share <- data[data$t == date, "market_share"]
   nest_share <- sapply(nest, function(x) sum(share[nest == x]))
   nest_share_ratio <- share / nest_share
   jacobian <- matrix(0, nrow = J_product, ncol = J_product)
@@ -251,8 +246,84 @@ jacobian_derivative_nest <- function(alpha, sigma, data, date){
 df$marginal_cost <- rep(0, T_length * J_product)
 for (tau in 1:T_length){
   for (j in 1:J_product){
-    df[df$t == tau & df$product_ID == j, "marginal_cost"] <- df[df$t == tau & df$product_ID == j, "price"] 
-    + df[df$t == tau & df$product_ID == j, "market_share"] / jacobian_derivative_nest(alpha_hat_nest, sigma_hat_nest, df, tau)[j,j]
+    df[df$t == tau & df$product_ID == j, "marginal_cost"] <- df[df$t == tau & df$product_ID == j, "price"] + df[df$t == tau & df$product_ID == j, "market_share"] / jacobian_derivative_nest(alpha_hat_nest, sigma_hat_nest, df, tau)[j,j]
   }
 }
 
+## Compute Lerner indices
+df$lerner <- (df$price - df$marginal_cost) / df$price
+
+####### Question 3(b)
+## Recover market shares from prices
+share_f <- function(real_price, price, real_log_share_ratio, real_log_nest_share_ratio){
+  deltas <- real_log_share_ratio - sigma_hat_nest * real_log_nest_share_ratio + alpha_hat_nest * (price - real_price)
+  exps <- exp(deltas / (1-sigma_hat_nest))
+  D_diet <- sum(exps[1:5])
+  D_regular <- sum(exps[6:10])
+  share <- rep(0,10)
+  for (j in 1:5){
+    share[j] <- (D_diet ^ (1-sigma_hat_nest)) / (D_diet ^ (1-sigma_hat_nest) + D_regular ^ (1-sigma_hat_nest) + 1) * exps[j] / D_diet
+  }
+  for (j in 6:10){
+    share[j] <- (D_regular ^ (1-sigma_hat_nest)) / (D_diet ^ (1-sigma_hat_nest) + D_regular ^ (1-sigma_hat_nest) + 1) * exps[j] / D_regular
+  }
+  return(share)
+}
+
+## Derive Jacobian matrix at a given share (instead of real share from data)
+jacobian_derivative_estimate <- function(share){
+  # Compute nest shares and nest share ratios
+  nest_share <- c(rep(sum(share[1:5]),5),rep(sum(share[6:10]),5))
+  nest_share_ratio <- share / nest_share
+  jacobian <- matrix(0, nrow = J_product, ncol = J_product)
+  for (i in 1:J_product){
+    for (j in 1:J_product){
+      if (i == j){
+        jacobian[i,j] <- alpha_hat_nest / (1-sigma_hat_nest) * share[i] * (1-nest_share_ratio[i]) + alpha_hat_nest * share[i] * nest_share_ratio[i] * (1-nest_share[i])
+      }
+      else if (nest_share[i] == nest_share[j]){ ## i,j in the same nest
+        jacobian[i,j] <- -1 * alpha_hat_nest / (1-sigma_hat_nest) * nest_share_ratio[j] * share[i] + alpha_hat_nest * nest_share_ratio[j] * share[i] * (1-nest_share[i])
+      }
+      else{ ## i,j not in the same nest
+        jacobian[i,j] <- -1 * alpha_hat_nest * share[i] * share[j]
+      }
+    }
+  }
+  return(jacobian)
+}
+
+## Derive FOCs if 1 and 2 merge at a given price
+focs_merge12 <- function(real_price, price, real_log_share_ratio, real_log_nest_share_ratio, marginal_cost){
+  share <- share_f(real_price, price, real_log_share_ratio, real_log_nest_share_ratio)
+  jacobian <- jacobian_derivative_estimate(share)
+  focs <- rep(0,10)
+  focs[1] <- share[1] + (price[1] - marginal_cost[1]) * jacobian[1,1] + (price[2] - marginal_cost[2]) * jacobian[1,2]
+  focs[2] <- share[2] + (price[1] - marginal_cost[1]) * jacobian[2,1] + (price[2] - marginal_cost[2]) * jacobian[2,2]
+  for (j in 3:10){
+    focs[j] <- share[j] + (price[j] - marginal_cost[j]) * jacobian[j,j]
+  }
+  return(focs)
+}
+
+## Set the objective to be sum of squared FOCs
+objective_merge12 <- function(price){
+  focs <- focs_merge12(df[df$t==100, "price"], price, df[df$t==100,"log_share_ratio"], df[df$t==100,"log_nest_share_ratio"], df[df$t==100,"marginal_cost"])
+  return(sum(focs^2))
+}
+
+## Find equilibrium prices
+initial_price <- rep(3,10)
+result_merge12 <- optim(initial_price, objective_merge12, control = list(maxit = 10000), method = "Nelder-Mead")
+merge12_price <- result_merge12$par
+
+###### Problem 3(d)
+## Derive total profit of all firms at a given price
+total_profit <- function(price){
+  share <- share_f(df[df$t==100, "price"], price, df[df$t==100,"log_share_ratio"], df[df$t==100,"log_nest_share_ratio"])
+  profit <- -1 * sum((price - df[df$t==100,"marginal_cost"]) * share)
+  return(profit)
+}
+
+initial_price <- rep(10,10)
+result_mergeall <- optim(initial_price, total_profit, control = list(maxit = 10000), method = "Nelder-Mead")
+mergeall_price <- result_mergeall$par
