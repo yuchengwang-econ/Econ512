@@ -75,7 +75,7 @@ df$share_price1_elasticity <- -1 * alpha_hat * df$price_1 * df$share_1
 ## Derive Jacobian matrix of price derivatives
 jacobian_derivative <- function(alpha, data, date){
   # Compute nest shares and nest share ratios
-  share <- data[data$t == date, "market_share"][["market_share"]]
+  share <- data[data$t == date, "market_share"]
   jacobian <- matrix(0, nrow = J_product, ncol = J_product)
   for (i in 1:J_product){
     for (j in 1:J_product){
@@ -126,10 +126,8 @@ df$log_nest_share_ratio <- log(df$nest_share_ratio)
 df$mean_sugar_others_nest <- (rep(aggregate(sugar ~ nest + t, data = df, FUN = sum)[,3], each = J_nest) - df$sugar) / (J_nest - 1)
 df$mean_caffeine_others_nest <- (rep(aggregate(caffeine ~ nest + t, data = df, FUN = sum)[,3], each = J_nest) - df$caffeine) / (J_nest - 1)
 
-## OLS estimation
-ols_model <- lm(log_share_ratio ~ price + sugar + caffeine + nestDiet + nestRegular + log_nest_share_ratio - 1, data = df) # No intercept
-
 ## 2SLS estimation
+library(AER)
 nest_model <- ivreg(df$log_share_ratio ~ df$price + df$sugar + df$caffeine + df$nestDiet + df$nestRegular + df$log_nest_share_ratio - 1 
                     | df$caffeine_extract_price + df$corn_syrup_price + df$sugar + df$caffeine + df$nestDiet + df$nestRegular + df$mean_sugar_others_nest + df$mean_caffeine_others_nest)
 alpha_hat_nest <- nest_model$coefficients[1]
