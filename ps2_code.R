@@ -64,7 +64,7 @@ consumer_sample <- data.table(do.call(rbind, sample_list))
 
 ## Question 1(c)
 ## Compute market share as function of delta=(delta_1t,...,delta_50t) and theta=(alpha^y,sigma1,sigma2)
-compute_market_share <- function(delta_list, theta_list, tau){
+compute_consumer_share <- function(delta_list, theta_list, tau){
   u_matrix <- data.table()
   for (j in 1:J_product){
     col_name <- paste0("u", j)
@@ -94,14 +94,29 @@ product_dataset <- product_dataset[, delta_mean := lambda_example[1] * price + l
 theta_example1 <- c(0,0,0)
 market_share_example1_list <- vector("list", T_market)
 for (tau in 1:T_market){
-  market_share_example1_list[[tau]] <- compute_market_share(product_dataset[t==tau, delta_mean], theta_example1, tau)
+  market_share_example1_list[[tau]] <- compute_consumer_share(product_dataset[t==tau, delta_mean], theta_example1, tau)
 }
 market_share_example1 <- data.table(do.call(rbind, market_share_example1_list))
 theta_example2 <- c(0,1,1)
 market_share_example2_list <- vector("list", T_market)
 for (tau in 1:T_market){
-  market_share_example2_list[[tau]] <- compute_market_share(product_dataset[t==tau, delta_mean], theta_example2, tau)
+  market_share_example2_list[[tau]] <- compute_consumer_share(product_dataset[t==tau, delta_mean], theta_example2, tau)
 }
 market_share_example2 <- data.table(do.call(rbind, market_share_example2_list))
 
 ## Question 1(e)
+compute_market_share <- function(delta_list, theta_list, tau){
+  consumer_share <- compute_consumer_share(delta_list, theta_list, tau)
+  market_share <- consumer_share[, lapply(.SD, mean)]
+  return(market_share)
+}
+## Create market share table
+market_share_table <- data.table(matrix(0, nrow = T_market, ncol = J_product))
+setnames(market_share_table, paste0("s", 1:J_product))
+## Compute market shares
+for (tau in 1:T_market){
+  market_share_table[tau, ] <- compute_market_share(product_dataset[t==tau, delta_mean], theta_example2, tau)
+  print(c(tau))
+}
+
+
