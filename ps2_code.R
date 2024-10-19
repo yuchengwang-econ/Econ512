@@ -17,8 +17,8 @@ J_product <- 50
 ## Compute ybar, sigma_y and pbar
 average_income <- census_dataset[, .(mean = mean(income)), by = t]
 variance_income <- census_dataset[, .(var = var(income)), by = t]
-product_dataset[, price_share_product := price * market_share]
-average_price_paid <- product_dataset[, .(sum = sum(price_share_product)), by = t]
+product_dataset[, sales := price * market_share]
+average_price_paid <- product_dataset[, .(sum = sum(sales)), by = t]
 
 ## Compute correlation between ybar and pbar
 print(cor(x = average_income$mean, y =average_price_paid$sum))
@@ -118,5 +118,109 @@ for (tau in 1:T_market){
   market_share_table[tau, ] <- compute_market_share(product_dataset[t==tau, delta_mean], theta_example2, tau)
   print(c(tau))
 }
+## Reshape the market share table to accommodate format in product_dataset
+market_share_table_reshaped <- melt(market_share_table, measure.vars = patterns("^s"), variable.name = "product_id", value.name = "market_share")
+market_share_table_reshaped[, time := rep(1:J_product, times = J_product)]
+market_share_table_reshaped[, product_id := as.numeric(sub("s", "", product_id))]
+setcolorder(market_share_table_reshaped, c("time", "product_id", "market_share"))
+setorder(market_share_table_reshaped, time, product_id)
+
+## Compute average income and sales (from estimated market shares)
+sample_average_income <- consumer_sample[, .(mean = mean(income)), by = t]
+market_share_table_reshaped[, price := product_dataset[, price]]
+market_share_table_reshaped[, sales := price * market_share]
+sample_average_price_paid <- market_share_table_reshaped[, .(sum = sum(sales)), by = time]
+
+## Compute correlation between ybar and pbar
+print(cor(x = sample_average_income$mean, y =sample_average_price_paid$sum))
+
+
+#################################
+## Question 2
+#################################
+
+## Question 2(a)
+## Write a function to obtain $delta_t^(\tau+1)$ given $delta_t^\tau$ and how its prediction matches data
+find_delta <- function(delta_guess, real_market_share, theta_list, tau, max_iteration, tolerance_rate){
+  delta <- delta_guess
+  round <- 0
+  while (TRUE){
+    predicted_market_share <- compute_market_share(delta, theta_list, tau)
+    new_delta <- delta + log(real_market_share) - log(predicted_market_share)
+    new_delta <- unlist(new_delta)
+    round <- round + 1
+    error <- sqrt(sum((delta - new_delta)^2))
+    print(c(error))
+    if (round >= max_iteration | error <= tolerance_rate){
+      break
+    }
+    delta <- new_delta
+  }
+  return(new_delta)
+}
+## An example
+example <- find_delta(rep(0, J_product), product_dataset[t==1, market_share], c(0,1,1), 1, 10, 0.1)
+
+## Question 2(b)
+## Draw 100 samples with size 100
+
+
+
+#################################
+## Question 3
+#################################
+
+## Question 3(a)
+## Construct price instruments and construct phat
+product_dataset[, corn_sugar_product := corn_syrup_price * sugar]
+product_dataset[, extract_caf_product := caffeine_extract_price * caffeine]
+price_model <- lm(price ~ corn_sugar_product + extract_caf_product, data = product_dataset)
+product_dataset[, price_hat := predict(price_model)]
+
+## Construct instruments and add them to product_dataset
+## x_jt and phat_jt are already there
+product_dataset[, average_income := rep(sample_average_income$mean, each = T_market)]
+product_dataset[, price_hat_average_income_product := price_hat * average_income]
+compute_ssd <- function(values) {
+  sapply(values, function(x) sum((x - values)^2))
+}
+product_dataset[, caffeine_ssd := compute_ssd(caffeine), by = t]
+product_dataset[, sugar_ssd := compute_ssd(sugar), by = t]
+## Remove redundant variables from product_dataset
+product_dataset[, average_income := NULL]
+
+## Question 3(b)
+gmm_moment <- function(theta_list){
+  ## Find delta_hat, X, Z, W
+  delta_hat <- c()
+  for (tau in 1:T_market){
+    delta_hat_t <- find_delta(rep(0,50), product_dataset[t==tau, market_share], theta_list, tau, 100, 0.1)
+    delta_hat <- c(delta_hat, delta_hat_t)
+  }
+  x_columns <- product_dataset[, .(sugar, caffeine)]
+  X <- as.matrix(x_columns)
+  one_column <- matrix(1, nrow = nrow(X), ncol = 1)
+  X <- cbind(one_column, X)
+  z_columns <- product_dataset[, .(sugar, caffeine, price_hat, caffeine_ssd, sugar_ssd)]
+  Z <- as.matrix(z_columns)
+  Z <- cbind(one_column, Z)
+  W <- solve(t(Z) %*% Z / (J_product * T_market))
+  ## Do GMM estimation to find lambda_hat
+  lambda_hat <- solve(t(X) %*% Z %*% W %*% t(Z) %*% X) %*% t(X) %*% Z %*% W %*% t(Z) %*% delta_hat
+  ## Compute xi_hat
+  price <- as.matrix(product_dataset[, price])
+  X_with_price <- cbind(price, X)
+  xi_hat <- delta_hat - X_with_price %*% lambda_hat
+  ## Compute moment g1
+  g1 <- t(Z) %*% xi_hat / (J_product * T_market)
+  ## Find moment funcion q
+  q <- t(g1) %*% W %*% g1
+  return(q)
+}
+
+theta_example3 <- c(-0.5, 2, 2)
+moment_example <- gmm_moment(theta_example3)
+
+
 
 
