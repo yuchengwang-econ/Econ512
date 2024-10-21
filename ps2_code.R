@@ -68,25 +68,15 @@ consumer_sample <- data.table(do.call(rbind, sample_list))
 ## Question 1(c)
 ## Compute consumer share as function of delta=(delta_1t,...,delta_50t) and theta=(alpha^y,sigma1,sigma2)
 compute_consumer_share <- function(delta_list, theta_list, sample, tau){
-  u_matrix <- data.table()
-  for (j in 1:J_product){
-    col_name <- paste0("u", j)
-    ## Compute u_ijt=mu_ijt+delta_jt
-    u_matrix <- u_matrix[, (col_name) := theta_list[1] * product_dataset[t==tau & product_ID==j, price] * sample[t==tau, income]
-                         + theta_list[2] * product_dataset[t==tau & product_ID==j, sugar] * sample[t==tau, v1]
-                         + theta_list[3] * product_dataset[t==tau & product_ID==j, caffeine] * sample[t==tau, v2]
-                         + delta_list[j]]
-  }
+  u_matrix <- theta_list[1] * as.matrix(sample[t==tau, income]) %*% t(as.matrix(product_dataset[t==tau, price])) + theta_list[2] * as.matrix(sample[t==tau, v1]) %*% t(as.matrix(product_dataset[t==tau, sugar])) + theta_list[3] * as.matrix(sample[t==tau, v2]) %*% t(as.matrix(product_dataset[t==tau, caffeine])) + matrix(rep(delta_list, nrow(sample[t==tau])), nrow = nrow(sample[t==tau]), byrow = TRUE)
   ## Compute IncVal_it
-  u_matrix <- u_matrix[, IncVal := log(rowSums(exp(.SD))+1), .SDcols = patterns("^u")]
+  IncVal <- apply(u_matrix, 1, function(x) log(sum(exp(x))+1))
   ## Compute s_ijt
-  for (j in 1:J_product){
-    target_col_name <- paste0("u", j)
-    col_name <- paste0("s", j)
-    u_matrix <- u_matrix[, (col_name) := exp(get(target_col_name) - IncVal)]
+  for (i in 1:nrow(u_matrix)) {
+    u_matrix[i, ] <- exp(u_matrix[i, ] - IncVal[i])
   }
-  s_matrix <- u_matrix[, .SD, .SDcols = patterns("^s")]
-  return(s_matrix)
+  u_matrix <- as.data.table(u_matrix)
+  return(u_matrix)
 }
 
 ## Question 1(d)
@@ -164,24 +154,26 @@ find_delta <- function(delta_guess, real_market_share, theta_list, sample, tau, 
 ## An example
 example <- find_delta(rep(0, J_product), product_dataset[t==1, market_share], c(0,1,1), consumer_sample, 1, 100000, 1e-6)
 
+## Start parallel computing
+numCores <- detectCores()
+cl <- makeCluster(numCores)
+registerDoParallel(cl)
+clusterExport(cl, c("consumer_sample", "find_delta", "compute_market_share", "compute_consumer_share", "product_dataset", "J_product", "T_market"))
+
 ## Question 2(b)
 small_sample_size <- 100
 sample_number <- 100
-delta1_sample <- rep(0, sample_number)
-for (n in 1:sample_number){
-  set.seed(1000+n)
-  ## Draw a sample with size 100 from consumer_sample
+
+delta1_sample_small <- foreach(n = 1:sample_number, .combine = 'c', .packages = 'data.table') %dopar% {
+  set.seed(1000 + n)
   random_rows <- sample(1:sample_size, size = small_sample_size, replace = TRUE)
   consumer_sample_small <- consumer_sample[random_rows]
-  ## Compute delta_hat and record
-  delta_hat <- find_delta(rep(0,J_product), product_dataset[t==1, market_share], c(0,1,1), consumer_sample_small, 1, 10000, 1e-6)
-  delta1_sample[n] <- delta_hat[1]
-  print(c(n))
+  delta_hat <- find_delta(rep(0, J_product), product_dataset[t == 1, market_share], c(0, 1, 1), consumer_sample_small, 1, 10000, 1e-5)
+  delta_hat[1]
 }
-## Caution: the loop above takes more than 5 hours!
 
 ## Plot distribution of delta_hat(1)
-hist(delta1_sample, breaks = 10, col = "lightblue", border = "blue", xlab = "delta", ylab = "Frequency")
+hist(delta1_sample_small, breaks = 10, col = "lightblue", border = "blue", xlab = "delta", ylab = "Frequency")
 grid()
 
 ## Find mean and variance
@@ -191,36 +183,13 @@ print(c(mean(delta1_sample), var(delta1_sample)))
 big_sample_size <- 500
 delta1_sample_big <- rep(0, big_sample_size)
 
-numCores <- detectCores()
-cl <- makeCluster(numCores)
-registerDoParallel(cl)
-
-for (n in 1:sample_number){
-  set.seed(10000+n)
-  ## Draw a sample with size 100 from consumer_sample
-  random_rows <- sample(1:sample_size, size = big_sample_size, replace = TRUE)
-  consumer_sample_big <- consumer_sample[random_rows]
-  ## Compute delta_hat and record
-  delta_hat <- find_delta(rep(0,J_product), product_dataset[t==1, market_share], c(0,1,1), consumer_sample_big, 1, 10000, 1e-6)
-  delta1_sample_big[n] <- delta_hat[1]
-  print(c(n))
-}
-
-numCores <- detectCores()
-cl <- makeCluster(numCores)
-registerDoParallel(cl)
-
-clusterExport(cl, c("consumer_sample", "find_delta", "product_dataset", "J_product", "sample_size", "big_sample_size"))
-
 delta1_sample_big <- foreach(n = 1:sample_number, .combine = 'c', .packages = 'data.table') %dopar% {
   set.seed(10000 + n)
   random_rows <- sample(1:sample_size, size = big_sample_size, replace = TRUE)
   consumer_sample_big <- consumer_sample[random_rows]
-  delta_hat <- find_delta(rep(0, J_product), product_dataset[t == 1, market_share], c(0, 1, 1), consumer_sample_big, 1, 10000, 1e-6)
+  delta_hat <- find_delta(rep(0, J_product), product_dataset[t == 1, market_share], c(0, 1, 1), consumer_sample_big, 1, 10000, 0.5)
   delta_hat[1]
 }
-
-stopCluster(cl)
 
 hist(delta1_sample_big, breaks = 10, col = "lightblue", border = "blue", xlab = "delta", ylab = "Frequency")
 grid()
@@ -257,16 +226,10 @@ price <- as.matrix(product_dataset[, price])
 one_column <- matrix(1, nrow = nrow(price), ncol = 1)
 X <- cbind(price, as.matrix(x_columns), one_column)
 colnames(X) <- c("price", "sugar", "caffeine", "intercept")
-z_columns <- product_dataset[, .(sugar, caffeine, price_hat, caffeine_ssd, sugar_ssd)]
+z_columns <- product_dataset[, .(sugar, caffeine, price_hat, price_hat_average_income_product, caffeine_ssd, sugar_ssd)]
 Z <- cbind(one_column, as.matrix(z_columns))
 colnames(Z)[1] <- "intercept"
 W <- solve(t(Z) %*% Z / (J_product * T_market))
-
-numCores <- detectCores()
-cl <- makeCluster(numCores)
-registerDoParallel(cl)
-
-clusterExport(cl, c("consumer_sample", "find_delta", "compute_market_share", "compute_consumer_share", "product_dataset", "J_product", "T_market"))
 
 gmm_moment <- function(theta_list){
   ## Find delta_hat
@@ -291,17 +254,10 @@ start_time <- proc.time()
 moment_example <- gmm_moment(theta_example3)
 end_time <- proc.time()
 print(end_time - start_time)
-stopCluster(cl)
 ## The processing time is near 100 minutes
 
 ## Question 3(c)
 ## Evaluate the gradient of GMM objective function
-numCores <- detectCores()
-cl <- makeCluster(numCores)
-registerDoParallel(cl)
-
-clusterExport(cl, c("consumer_sample", "find_delta", "compute_market_share", "compute_consumer_share", "product_dataset", "J_product", "T_market"))
-
 find_gmm_gradient <- function(theta_list){
   delta_hat <- foreach(tau = 1:T_market, .combine = 'c', .packages = 'data.table') %dopar% {
     delta_hat_t <- find_delta(rep(0,50), product_dataset[t==tau, market_share], theta_list, consumer_sample, tau, 10000, 1e-6)
@@ -334,5 +290,11 @@ moment_example_case2 <- gmm_moment(theta_example3_case2)
 moment_example_case3 <- gmm_moment(theta_example3_case3)
 gradient <- c((moment_example_case1 - moment_example)/epsilon, (moment_example_case2 - moment_example)/epsilon, (moment_example_case3 - moment_example)/epsilon)
 
+## Question 3(e)
+start_time <- proc.time()
+theta_hat <- optim(c(0,0,0), gmm_moment, method = "BFGS")
+end_time <- proc.time()
+print(end_time - start_time)
 
+stopCluster(cl)
 
