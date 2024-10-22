@@ -168,7 +168,7 @@ delta1_sample_small <- foreach(n = 1:sample_number, .combine = 'c', .packages = 
   set.seed(1000 + n)
   random_rows <- sample(1:sample_size, size = small_sample_size, replace = TRUE)
   consumer_sample_small <- consumer_sample[random_rows]
-  delta_hat <- find_delta(rep(0, J_product), product_dataset[t == 1, market_share], c(0, 1, 1), consumer_sample_small, 1, 10000, 1e-5)
+  delta_hat <- find_delta(rep(0, J_product), product_dataset[t == 1, market_share], c(0, 1, 1), consumer_sample_small, 1, 10000, 1e-6)
   delta_hat[1]
 }
 
@@ -183,13 +183,16 @@ print(c(mean(delta1_sample), var(delta1_sample)))
 big_sample_size <- 500
 delta1_sample_big <- rep(0, big_sample_size)
 
+start_time <- proc.time()
 delta1_sample_big <- foreach(n = 1:sample_number, .combine = 'c', .packages = 'data.table') %dopar% {
   set.seed(10000 + n)
   random_rows <- sample(1:sample_size, size = big_sample_size, replace = TRUE)
   consumer_sample_big <- consumer_sample[random_rows]
-  delta_hat <- find_delta(rep(0, J_product), product_dataset[t == 1, market_share], c(0, 1, 1), consumer_sample_big, 1, 10000, 0.5)
+  delta_hat <- find_delta(rep(0, J_product), product_dataset[t == 1, market_share], c(0, 1, 1), consumer_sample_big, 1, 10000, 1e-6)
   delta_hat[1]
 }
+end_time <- proc.time()
+print(end_time - start_time)
 
 hist(delta1_sample_big, breaks = 10, col = "lightblue", border = "blue", xlab = "delta", ylab = "Frequency")
 grid()
@@ -281,20 +284,33 @@ find_gmm_gradient <- function(theta_list){
 }
 
 ## Question 3(d)
+
 epsilon <- 1e-4
 theta_example3_case1 <- c(-0.5+epsilon, 2, 2)
 theta_example3_case2 <- c(-0.5, 2+epsilon, 2)
 theta_example3_case3 <- c(-0.5, 2, 2+epsilon)
+
+start_time <- proc.time()
 moment_example_case1 <- gmm_moment(theta_example3_case1)
 moment_example_case2 <- gmm_moment(theta_example3_case2)
 moment_example_case3 <- gmm_moment(theta_example3_case3)
+end_time <- proc.time()
+print(end_time - start_time)
+
 gradient <- c((moment_example_case1 - moment_example)/epsilon, (moment_example_case2 - moment_example)/epsilon, (moment_example_case3 - moment_example)/epsilon)
 
 ## Question 3(e)
 start_time <- proc.time()
 theta_hat <- optim(c(0,0,0), gmm_moment, method = "BFGS")
+final_delta_hat <- foreach(tau = 1:T_market, .combine = 'c', .packages = 'data.table') %dopar% {
+  delta_hat_t <- find_delta(rep(0,50), product_dataset[t==tau, market_share], theta_hat$par, consumer_sample, tau, 10000, 1e-6)
+  delta_hat_t
+}
+lambda_hat <- solve(t(X) %*% Z %*% W %*% t(Z) %*% X) %*% t(X) %*% Z %*% W %*% t(Z) %*% final_delta_hat
 end_time <- proc.time()
 print(end_time - start_time)
+## It takes 6-7 hours to process
+## Final result: (-1.48, -.867, .528, .423; .086, .980, .901)
 
 stopCluster(cl)
 
