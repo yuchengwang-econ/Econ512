@@ -1,0 +1,387 @@
+---
+title: "IO Problem Set 2: BLP"
+output: html_notebook
+---
+
+## Question 1: Computing market shares with simulation draws.
+The initialization (use libraries, read and extract data, etc.) is shown below.
+```{r}
+rm(list=ls())
+library(dplyr)
+library(data.table)
+library(foreach)
+library(doParallel)
+
+## Question 1(a)
+## Extract data
+setwd("C:/Users/Yucheng Wang/Desktop/Study/Econ543 IO/PS2")
+product_dataset <- fread("product_data_ps2.csv", header = TRUE, sep = ",")
+census_dataset <- fread("consumer_census.csv", header = TRUE, sep = ",")
+T_market <- 50
+J_product <- 50
+```
+### Problem 1(a)
+Compute $\bar{y}_t,\sigma_{y_t}$ and $\bar{p}_t$ for each market.
+```{r}
+## Compute ybar, sigma_y and pbar
+average_income <- census_dataset[, .(mean = mean(income)), by = t]
+variance_income <- census_dataset[, .(var = var(income)), by = t]
+product_dataset[, sales := price * market_share]
+average_price_paid <- product_dataset[, .(sum = sum(sales)), by = t]
+```
+Compute $cor(\bar{y}_t,\bar{p}_t)$.
+```{r}
+## Compute correlation between ybar and pbar
+print(cor(x = average_income$mean, y =average_price_paid$sum))
+```
+### Problem 1(b)
+Draw 50 samples of size 100, and report the mean and the variance of $y_{it},\nu_{i1}$ and $\nu_{i2}$. The first 3 columns are mean, and last 3 columns are variance; one can see that they roughly equal $(6,0,0,0.25,1,1)$.
+```{r}
+draw_consumers <- function(income_list, S, seed){
+  set.seed(seed)
+  income <- matrix(sample(income_list, S, replace = TRUE), nrow = S, ncol = 1)
+  v <- matrix(rnorm(S * 2), nrow = S, ncol = 2)
+  draws <- cbind(income, v)
+  return(draws)
+}
+
+## Draw 50 samples of size 100
+sample_number <- 50
+sample_size <- 100
+sample_list <- vector("list", sample_number)
+seed_list <- seq(101, 150)
+## Draw samples using the distribution of incomes at t=1
+for (i in 1:sample_number){
+  sample_list[[i]] <- draw_consumers(census_dataset[, income], sample_size, seed_list[i])
+}
+## Compute mean and variance of each column in each sample
+sample_mean_table <- matrix(NA, nrow = sample_number, ncol=3)
+sample_variance_table <- matrix(NA, nrow = sample_number, ncol=3)
+for (i in 1:sample_number){
+  sample_mean_table[i, ] <- colMeans(sample_list[[i]])
+  sample_variance_table[i, ] <- apply(sample_list[[i]], 2, var)
+}
+sample_mean_variance_table <- cbind(sample_mean_table, sample_variance_table)
+print(sample_mean_variance_table[1:10,])
+```
+Then use this function to draw a sample of 500 consumers for each market $t$.
+```{r}
+## Draw samples of size 500 for each t
+seed <- 42
+sample_size <- 500
+sample_list <- vector("list", T_market)
+for (tau in 1:T_market){
+  matrix <- draw_consumers(census_dataset[t==tau, income], sample_size, seed)
+  matrix <- cbind(matrix, SourceMatrix = tau)
+  colnames(matrix) <- c("income", "v1", "v2", "t")
+  sample_list[[tau]] <- matrix
+}
+consumer_sample <- data.table(do.call(rbind, sample_list))
+```
+### Problem 1(c)
+Write a function with input $\delta_t$ and $\theta_2=(\alpha,\sigma_1,\sigma_2)$, that computes individual choice probabilities $s_{ijt}$.
+```{r}
+## Compute consumer share as function of delta=(delta_1t,...,delta_50t) and theta=(alpha^y,sigma1,sigma2)
+compute_consumer_share <- function(delta_list, theta_list, sample, tau){
+  u_matrix <- theta_list[1] * as.matrix(sample[t==tau, income]) %*% t(as.matrix(product_dataset[t==tau, price])) + theta_list[2] * as.matrix(sample[t==tau, v1]) %*% t(as.matrix(product_dataset[t==tau, sugar])) + theta_list[3] * as.matrix(sample[t==tau, v2]) %*% t(as.matrix(product_dataset[t==tau, caffeine])) + matrix(rep(delta_list, nrow(sample[t==tau])), nrow = nrow(sample[t==tau]), byrow = TRUE)
+  ## Compute IncVal_it
+  IncVal <- apply(u_matrix, 1, function(x) log(sum(exp(x))+1))
+  ## Compute s_ijt
+  for (i in 1:nrow(u_matrix)) {
+    u_matrix[i, ] <- exp(u_matrix[i, ] - IncVal[i])
+  }
+  u_matrix <- as.data.table(u_matrix)
+  return(u_matrix)
+}
+```
+### Problem 1(d)
+Suppose $\bar{\alpha}=-1,\beta_1=0.5,\beta_2=0.5,\gamma=-1.5$, and assume $\xi_{jt}=0$. Compute $\delta_{jt}$.
+```{r}
+## Given mean parameters lambda=(alpha, beta_1, beta_2, gamma), compute delta for each jt
+lambda_example <- c(-1, 0.5, 0.5, -1.5)
+product_dataset <- product_dataset[, delta_mean := lambda_example[1] * price + lambda_example[2] * sugar + lambda_example[3] * caffeine + lambda_example[4]]
+```
+Let $\theta'_2=(0,0,0)$ and compute conditional shares for each consumer. I display the share of first 10 products of first 10 individual in market $t=1$ for illustration. Individual share in each market is identical across consumers because no heterogeneity is introduced.
+```{r}
+## Given theta vectors, compute market shares
+theta_example1 <- c(0,0,0)
+consumer_share_example1_list <- vector("list", T_market)
+for (tau in 1:T_market){
+  consumer_share_example1_list[[tau]] <- compute_consumer_share(product_dataset[t==tau, delta_mean], theta_example1, consumer_sample, tau)
+}
+consumer_share_example1 <- data.table(do.call(rbind, consumer_share_example1_list))
+print(consumer_share_example1[1:10,1:5])
+```
+Let $\theta''_2=(0,1,1)$ and compute conditional shares for each consumer. I display the share of first 10 products of first 10 consumers at market $t=1$, and now the shares are different.
+```{r}
+theta_example2 <- c(0,1,1)
+consumer_share_example2_list <- vector("list", T_market)
+for (tau in 1:T_market){
+  consumer_share_example2_list[[tau]] <- compute_consumer_share(product_dataset[t==tau, delta_mean], theta_example2, consumer_sample, tau)
+}
+consumer_share_example2 <- data.table(do.call(rbind, consumer_share_example2_list))
+print(consumer_share_example2[1:10,1:5])
+```
+### Problem 1(e)
+Write a function that aggregates the indiviudal choice probabilities of all consumers, as a function of $\delta_t$ and $\theta_2$.
+```{r}
+compute_market_share <- function(delta_list, theta_list, sample, tau){
+  consumer_share <- compute_consumer_share(delta_list, theta_list, sample, tau)
+  market_share <- consumer_share[, lapply(.SD, mean)]
+  return(market_share)
+}
+```
+Given $\theta''_2=(0,1,1)$, the vector $\delta_t^p$ and the sample of simulated consumers, compute predicted market shares for all products and all markets.
+```{r}
+## Create market share table
+market_share_table <- data.table(matrix(0, nrow = T_market, ncol = J_product))
+setnames(market_share_table, paste0("s", 1:J_product))
+## Compute market shares
+for (tau in 1:T_market){
+  market_share_table[tau, ] <- compute_market_share(product_dataset[t==tau, delta_mean], theta_example2, consumer_sample, tau)
+}
+## Reshape the market share table to accommodate format in product_dataset
+market_share_table_reshaped <- melt(market_share_table, measure.vars = patterns("^s"), variable.name = "product_id", value.name = "market_share")
+market_share_table_reshaped[, time := rep(1:J_product, times = J_product)]
+market_share_table_reshaped[, product_id := as.numeric(sub("s", "", product_id))]
+setcolorder(market_share_table_reshaped, c("time", "product_id", "market_share"))
+setorder(market_share_table_reshaped, time, product_id)
+```
+Compute $\bar{p}''_t$ and $cor(\bar{p}''_t,\bar{y}_t)$. The result shows no significant difference from the correlation observed in the data, and both of them are close to zero, so it suggests the true value of $\alpha^y$ to be close to zero as well. 
+```{r}
+## Compute average income and sales (from estimated market shares)
+sample_average_income <- consumer_sample[, .(mean = mean(income)), by = t]
+market_share_table_reshaped[, price := product_dataset[, price]]
+market_share_table_reshaped[, sales := price * market_share]
+sample_average_price_paid <- market_share_table_reshaped[, .(sum = sum(sales)), by = time]
+
+## Compute correlation between ybar and pbar
+print(cor(x = sample_average_income$mean, y =sample_average_price_paid$sum))
+```
+## Question 2: Inverting shares to recover mean product qualities given non-linear parameters
+### Problem 2(a)
+Write a function that employs the contraction mapping
+$$\delta_t^{(\tau+1)}=\delta_t^{(\tau)}+\log(s_t)-\log(\hat{s}_t(\delta_t^{(\tau)},\theta_2)).$$
+```{r}
+## Write a function to obtain $delta_t^(\tau+1)$ given $delta_t^\tau$ and how its prediction matches data
+find_delta <- function(delta_guess, real_market_share, theta_list, sample, tau, max_iteration, tolerance_rate){
+  delta <- delta_guess
+  round <- 0
+  while (TRUE){
+    predicted_market_share <- compute_market_share(delta, theta_list, sample, tau)
+    new_delta <- delta + (log(real_market_share) - log(predicted_market_share))
+    new_delta <- unlist(new_delta)
+    round <- round + 1
+    error <- sqrt(sum((delta - new_delta)^2))
+    if (round >= max_iteration | error <= tolerance_rate){
+      break
+    }
+    delta <- new_delta
+    print(c(round, error))
+  }
+  return(new_delta)
+}
+```
+### Problem 2(b)
+To speed up processing the codes below, I start parallel computing.
+```{r}
+## Start parallel computing
+numCores <- detectCores()
+cl <- makeCluster(numCores)
+registerDoParallel(cl)
+clusterExport(cl, c("consumer_sample", "find_delta", "compute_market_share", "compute_consumer_share", "product_dataset", "J_product", "T_market"))
+```
+For market $t=1$, draw 100 samples of 100 consumers (from simulated population), employ the contraction mapping to find $\hat{\delta}(\theta''_2)$.
+```{r}
+small_sample_size <- 100
+sample_number <- 100
+
+delta1_sample_small <- foreach(n = 1:sample_number, .combine = 'c', .packages = 'data.table') %dopar% {
+  set.seed(1000 + n)
+  random_rows <- sample(1:sample_size, size = small_sample_size, replace = TRUE)
+  consumer_sample_small <- consumer_sample[random_rows]
+  delta_hat <- find_delta(rep(0, J_product), product_dataset[t == 1, market_share], c(0, 1, 1), consumer_sample_small, 1, 10000, 1e-6)
+  delta_hat[1]
+}
+```
+Plot the distribution of $\hat{\delta}_1(\theta''_2)$. Most of them fall in the range $[1.5,3.5]$.
+```{r}
+## Plot distribution of delta_hat(1)
+hist(delta1_sample_small, breaks = 10, col = "lightblue", border = "blue", xlab = "delta", ylab = "Frequency")
+grid()
+```
+Report the sample mean and sample variance.
+```{r}
+## Find mean and variance
+print(c(mean(delta1_sample_small), var(delta1_sample_small)))
+```
+Repeat the procedures while increase the size of each sample from 100 to 500.
+```{r}
+## Draw samples with larger size and repeat
+big_sample_size <- 500
+delta1_sample_big <- rep(0, big_sample_size)
+
+delta1_sample_big <- foreach(n = 1:sample_number, .combine = 'c', .packages = 'data.table') %dopar% {
+  set.seed(10000 + n)
+  random_rows <- sample(1:sample_size, size = big_sample_size, replace = TRUE)
+  consumer_sample_big <- consumer_sample[random_rows]
+  delta_hat <- find_delta(rep(0, J_product), product_dataset[t == 1, market_share], c(0, 1, 1), consumer_sample_big, 1, 10000, 1e-6)
+  delta_hat[1]
+}
+```
+The distribution of $\hat{\delta}_1(\theta''_2)$, sample mean and sample variance are shown below. One can see that the predicted $\delta$'s are more accurate as sample size increases.
+```{r}
+hist(delta1_sample_big, breaks = 10, col = "lightblue", border = "blue", xlab = "delta", ylab = "Frequency")
+grid()
+```
+```{r}
+print(c(mean(delta1_sample_big), var(delta1_sample_big)))
+```
+## Question 3: The objective function
+### Problem 3(a)
+Construct differentiation instruments $A_j(x_j,w_t)$.
+```{r}
+## Construct price instruments and construct phat
+product_dataset[, corn_sugar_product := corn_syrup_price * sugar]
+product_dataset[, extract_caf_product := caffeine_extract_price * caffeine]
+price_model <- lm(price ~ corn_sugar_product + extract_caf_product, data = product_dataset)
+product_dataset[, price_hat := predict(price_model)]
+
+## Construct instruments and add them to product_dataset
+## x_jt and phat_jt are already there
+product_dataset[, average_income := rep(sample_average_income$mean, each = T_market)]
+product_dataset[, price_hat_average_income_product := price_hat * average_income]
+compute_ssd <- function(values) {
+  sapply(values, function(x) sum((x - values)^2))
+}
+product_dataset[, caffeine_ssd := compute_ssd(caffeine), by = t]
+product_dataset[, sugar_ssd := compute_ssd(sugar), by = t]
+## Remove redundant variables from product_dataset
+product_dataset[, average_income := NULL]
+```
+### Problem 3(b)
+Code the GMM objective function to estimate the non-linear parameters $\theta_2$.
+```{r}
+## Find matrices X, Z, W
+x_columns <- product_dataset[, .(sugar, caffeine)]
+price <- as.matrix(product_dataset[, price])
+one_column <- matrix(1, nrow = nrow(price), ncol = 1)
+X <- cbind(price, as.matrix(x_columns), one_column)
+colnames(X) <- c("price", "sugar", "caffeine", "intercept")
+z_columns <- product_dataset[, .(sugar, caffeine, price_hat, price_hat_average_income_product, caffeine_ssd, sugar_ssd)]
+Z <- cbind(one_column, as.matrix(z_columns))
+colnames(Z)[1] <- "intercept"
+W <- solve(t(Z) %*% Z / (J_product * T_market))
+
+gmm_moment <- function(theta_list){
+  ## Find delta_hat
+  delta_hat <- foreach(tau = 1:T_market, .combine = 'c', .packages = 'data.table') %dopar% {
+    delta_hat_t <- find_delta(rep(0,50), product_dataset[t==tau, market_share], theta_list, consumer_sample, tau, 10000, 1e-6)
+    delta_hat_t
+  }
+  ## Do GMM estimation to find lambda_hat
+  lambda_hat <- solve(t(X) %*% Z %*% W %*% t(Z) %*% X) %*% t(X) %*% Z %*% W %*% t(Z) %*% delta_hat
+  ## Compute xi_hat
+  xi_hat <- delta_hat - X %*% lambda_hat
+  ## Compute moment g1
+  g1 <- t(Z) %*% xi_hat / (J_product * T_market)
+  ## Find moment function q
+  q <- t(g1) %*% W %*% g1
+  return(q)
+}
+```
+Evaluate the objective function at $\tilde{\theta}=(-0.5,2,2)$.
+```{r}
+theta_example3 <- c(-0.5, 2, 2)
+gmm_example3 <- gmm_moment(theta_example3)
+print(gmm_example3)
+```
+### Problem 3(c)
+Write a function that computes the analytic gradient, with $\theta_2$ as input. It follows from
+$$\hat{s}_{jt}=\sum_{i\in S_t}\frac{1}{|S_t|}\frac{\exp(\delta_{jt}+\mu_{ijt}(\theta_2))}{1+\sum_{k\in J_t}\exp(\delta_{kt}+\mu_{ikt}(\theta_2))}$$
+that
+$$\begin{aligned}\frac{\partial\hat{s}_{jt}}{\partial \delta_{kt}}= & \begin{cases}\sum_{i\in S_t}\frac{1}{|S_t|}\hat{s}_{ijt}(1-\hat{s}_{ijt}) & j=k \\ -\sum_{i\in S_t}\frac{1}{|S_t|}\hat{s}_{ijt}\hat{s}_{ikt} & j\neq k,\end{cases}\\
+
+\frac{\partial\hat{s}_{jt}}{\partial\alpha} =& \sum_{i\in S_t}\frac{1}{|S_t|}\hat{s}_{ijt}y_{it}\left(p_{jt}-\sum_{k\in J_t}\hat{s}_{ikt}p_{kt}\right),\\
+
+\frac{\partial\hat{s}_{jt}}{\partial\sigma_1} =& \sum_{i\in S_t}\frac{1}{|S_t|}\hat{s}_{ijt}\nu_{i1t}\left(\text{sugar}_{jt}-\sum_{k\in J_t}\hat{s}_{ikt}\text{sugar}_{kt}\right),\\
+
+\frac{\partial\hat{s}_{jt}}{\partial\sigma_2} =& \sum_{i\in S_t}\frac{1}{|S_t|}\hat{s}_{ijt}\nu_{i2t}\left(\text{caffeine}_{jt}-\sum_{k\in J_t}\hat{s}_{ikt}\text{caffeine}_{kt}\right).\end{aligned}$$
+```{r}
+find_gradient <- function(theta_list){
+  xi_by_theta <- foreach(tau = 1:T_market, .combine = 'rbind', .packages = 'data.table') %dopar% {
+    delta_hat <- find_delta(rep(0,50), product_dataset[t==tau, market_share], theta_list, consumer_sample, tau, 10000, 1e-6)
+    share_hat <- as.matrix(compute_consumer_share(delta_hat, theta_list, consumer_sample, tau))
+    price <- as.matrix(product_dataset[t==tau, price])
+    sugar <- as.matrix(product_dataset[t==tau, sugar])
+    caffeine <- as.matrix(product_dataset[t==tau, caffeine])
+    income <- as.matrix(consumer_sample[t==tau, income])
+    nu1 <- as.matrix(consumer_sample[t==tau, v1])
+    nu2 <- as.matrix(consumer_sample[t==tau, v2])
+    ## Compute partial s_hat / partial theta
+    shat_by_alpha <- as.matrix(colMeans(share_hat * income %*% t(price)) - colMeans(sweep(share_hat, 1, income * (share_hat %*% price), '*')))
+    shat_by_sigma1 <- as.matrix(colMeans(share_hat * nu1 %*% t(sugar)) - colMeans(sweep(share_hat, 1, nu1 * (share_hat %*% sugar), '*')))
+    shat_by_sigma2 <- as.matrix(colMeans(share_hat * nu2 %*% t(caffeine)) - colMeans(sweep(share_hat, 1, nu2 * (share_hat %*% caffeine), '*')))
+    shat_theta_derivative <- cbind(shat_by_alpha, shat_by_sigma1, shat_by_sigma2)
+    ## Compute partial s_hat/ partial delta
+    shat_delta_derivative <- -1 * t(share_hat) %*% (share_hat) / 500
+    diag(shat_delta_derivative) <- diag(shat_delta_derivative) + colMeans(share_hat)
+    ## Compute xi_theta
+    xi_theta_derivative <- (-1) * solve(shat_delta_derivative) %*% shat_theta_derivative
+    xi_theta_derivative
+  }
+  G <- t(Z) %*% xi_by_theta / (J_product * T_market)
+  ## Find g1 by repeating the process in gmm moment computation
+  delta_hat <- foreach(tau = 1:T_market, .combine = 'c', .packages = 'data.table') %dopar% {
+    delta_hat_t <- find_delta(rep(0,50), product_dataset[t==tau, market_share], theta_list, consumer_sample, tau, 10000, 1e-6)
+    delta_hat_t
+  }
+  lambda_hat <- solve(t(X) %*% Z %*% W %*% t(Z) %*% X) %*% t(X) %*% Z %*% W %*% t(Z) %*% delta_hat
+  xi_hat <- delta_hat - X %*% lambda_hat
+  ## Compute moment g1
+  g1 <- t(Z) %*% xi_hat / (J_product * T_market)
+  gradient_analytic <- 2 * t(G) %*% W %*% g1
+  return(gradient_analytic)
+}
+```
+```{r}
+gradient_example3 <- find_gradient(theta_example3)
+print(gradient_example3)
+```
+### Problem 3(f)
+Compute the gradient of GMM objective function numerically, evaluated at $\tilde{\theta}=(-0.5,2,2)$.
+```{r}
+epsilon <- 1e-6
+theta_example3_case1 <- c(-0.5+epsilon, 2, 2)
+theta_example3_case2 <- c(-0.5, 2+epsilon, 2)
+theta_example3_case3 <- c(-0.5, 2, 2+epsilon)
+
+gmm_example_case1 <- gmm_moment(theta_example3_case1)
+gmm_example_case2 <- gmm_moment(theta_example3_case2)
+gmm_example_case3 <- gmm_moment(theta_example3_case3)
+
+gradient_numerical <- c((gmm_example_case1 - gmm_example3)/epsilon, (gmm_example_case2 - gmm_example3)/epsilon, (gmm_example_case3 - gmm_example3)/epsilon)
+print(gradient_numerical)
+```
+
+### Problem 3(g)
+Estimate the vector $\hat{\theta}_2$ that minimizes the GMM objective function. Report the estimated coefficients.
+```{r}
+final_theta_hat <- optim(c(0,0,0), gmm_moment, method = 'BFGS')
+print(final_theta_hat$par)
+```
+The final estimation results are shown below.
+```{r}
+final_delta_hat <- foreach(tau = 1:T_market, .combine = 'c', .packages = 'data.table') %dopar% {
+  delta_hat_t <- find_delta(rep(0,50), product_dataset[t==tau, market_share], final_theta_hat$par, consumer_sample, tau, 10000, 1e-6)
+  delta_hat_t
+}
+final_lambda_hat <- solve(t(X) %*% Z %*% W %*% t(Z) %*% X) %*% t(X) %*% Z %*% W %*% t(Z) %*% final_delta_hat
+print(c(final_theta_hat$par, final_lambda_hat))
+```
+The order of coefficients are listed below.
+$$\hat{\alpha}^y=0.086,\hat{\sigma}_1=0.980,\hat{\sigma}_2=0.901,\hat{\bar{\alpha}}=-0.867,\hat{\beta}_1=0.528,\hat{\beta}_2=0.423,\hat{\gamma}=-1.479.$$
+Stop parallel computing to complete the assignment.
+```{r}
+stopCluster(cl)
+```
