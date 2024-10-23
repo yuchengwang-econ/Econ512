@@ -42,7 +42,7 @@ sample_list <- vector("list", sample_number)
 seed_list <- seq(101, 150)
 ## Draw samples using the distribution of incomes at t=1
 for (i in 1:sample_number){
-  sample_list[[i]] <- draw_consumers(census_dataset[t==1, income], sample_size, seed_list[i])
+  sample_list[[i]] <- draw_consumers(census_dataset[, income], sample_size, seed_list[i])
 }
 ## Compute mean and variance of each column in each sample
 sample_mean_table <- matrix(NA, nrow = sample_number, ncol=3)
@@ -52,6 +52,7 @@ for (i in 1:sample_number){
   sample_variance_table[i, ] <- apply(sample_list[[i]], 2, var)
 }
 sample_mean_variance_table <- cbind(sample_mean_table, sample_variance_table)
+print(sample_mean_variance_table[1:10,])
 
 ## Draw samples of size 500 for each t
 seed <- 42
@@ -126,8 +127,6 @@ sample_average_price_paid <- market_share_table_reshaped[, .(sum = sum(sales)), 
 ## Compute correlation between ybar and pbar
 print(cor(x = sample_average_income$mean, y =sample_average_price_paid$sum))
 
-
-
 #################################
 ## Question 2
 #################################
@@ -151,8 +150,6 @@ find_delta <- function(delta_guess, real_market_share, theta_list, sample, tau, 
   }
   return(new_delta)
 }
-## An example
-example <- find_delta(rep(0, J_product), product_dataset[t==1, market_share], c(0,1,1), consumer_sample, 1, 100000, 1e-6)
 
 ## Start parallel computing
 numCores <- detectCores()
@@ -177,13 +174,12 @@ hist(delta1_sample_small, breaks = 10, col = "lightblue", border = "blue", xlab 
 grid()
 
 ## Find mean and variance
-print(c(mean(delta1_sample), var(delta1_sample)))
+print(c(mean(delta1_sample_small), var(delta1_sample_small)))
 
 ## Draw samples with larger size and repeat
 big_sample_size <- 500
 delta1_sample_big <- rep(0, big_sample_size)
 
-start_time <- proc.time()
 delta1_sample_big <- foreach(n = 1:sample_number, .combine = 'c', .packages = 'data.table') %dopar% {
   set.seed(10000 + n)
   random_rows <- sample(1:sample_size, size = big_sample_size, replace = TRUE)
@@ -191,8 +187,6 @@ delta1_sample_big <- foreach(n = 1:sample_number, .combine = 'c', .packages = 'd
   delta_hat <- find_delta(rep(0, J_product), product_dataset[t == 1, market_share], c(0, 1, 1), consumer_sample_big, 1, 10000, 1e-6)
   delta_hat[1]
 }
-end_time <- proc.time()
-print(end_time - start_time)
 
 hist(delta1_sample_big, breaks = 10, col = "lightblue", border = "blue", xlab = "delta", ylab = "Frequency")
 grid()
@@ -248,69 +242,67 @@ gmm_moment <- function(theta_list){
   g1 <- t(Z) %*% xi_hat / (J_product * T_market)
   ## Find moment function q
   q <- t(g1) %*% W %*% g1
-  return(q)
+  return(list(value = q, g = g1))
 }
 
 theta_example3 <- c(-0.5, 2, 2)
-
-start_time <- proc.time()
-moment_example <- gmm_moment(theta_example3)
-end_time <- proc.time()
-print(end_time - start_time)
-## The processing time is near 100 minutes
+gmm_example3 <- gmm_moment(theta_example3)
+print(gmm_example3$value)
 
 ## Question 3(c)
 ## Evaluate the gradient of GMM objective function
-find_gmm_gradient <- function(theta_list){
-  delta_hat <- foreach(tau = 1:T_market, .combine = 'c', .packages = 'data.table') %dopar% {
-    delta_hat_t <- find_delta(rep(0,50), product_dataset[t==tau, market_share], theta_list, consumer_sample, tau, 10000, 1e-6)
-    delta_hat_t
+find_xi_by_theta <- function(theta_list){
+  xi_by_theta <- foreach(tau = 1:T_market, .combine = 'rbind', .packages = 'data.table') %dopar% {
+    delta_hat <- find_delta(rep(0,50), product_dataset[t==tau, market_share], theta_list, consumer_sample, tau, 10000, 1e-6)
+    share_hat <- as.matrix(compute_consumer_share(delta_hat, theta_list, consumer_sample, tau))
+    price <- as.matrix(product_dataset[t==tau, price])
+    sugar <- as.matrix(product_dataset[t==tau, sugar])
+    caffeine <- as.matrix(product_dataset[t==tau, caffeine])
+    income <- as.matrix(consumer_sample[t==tau, income])
+    nu1 <- as.matrix(consumer_sample[t==tau, v1])
+    nu2 <- as.matrix(consumer_sample[t==tau, v2])
+    ## Compute partial s_hat / partial theta
+    shat_by_alpha <- t(sweep(share_hat, 1, income, '*')) %*% share_hat %*% price / 500
+    shat_by_sigma1 <- as.matrix(colMeans(sweep(sweep(share_hat, 1, nu1, '*'), 2, sugar, '*') - colMeans(sweep(share_hat, 1, nu1 * (share_hat %*% sugar), '*'))))
+    shat_by_sigma2 <- as.matrix(colMeans(sweep(sweep(share_hat, 1, nu2, '*'), 2, caffeine, '*') - colMeans(sweep(share_hat, 1, nu2 * (share_hat %*% caffeine), '*'))))
+    shat_theta_derivative <- cbind(shat_by_alpha, shat_by_sigma1, shat_by_sigma2)
+    ## Compute partial s_hat/ partial delta
+    shat_delta_derivative <- -1 * t(share_hat) %*% (share_hat) / 500
+    diag(shat_delta_derivative) <- diag(shat_delta_derivative) + colMeans(share_hat)
+    ## Compute xi_theta
+    xi_theta_derivative <- solve(shat_delta_derivative) %*% shat_theta_derivative
+    xi_theta_derivative
   }
-  lambda_hat <- solve(t(X) %*% Z %*% W %*% t(Z) %*% X) %*% t(X) %*% Z %*% W %*% t(Z) %*% delta_hat
-  xi_hat <- delta_hat - X %*% lambda_hat
-  g1 <- t(Z) %*% xi_hat / (J_product * T_market)
-  ## Find partial s_hat / partial delta
-  jacobian_delta_list <- foreach(tau = 1:T_market, .combine='c', .packages = 'data.table') %dopar% {
-    
-    jacobian
-  }
-  ## Find partial s_hat / partial theta
-  
-  ## Find G
-  
-  ## Compute nabla q
-  
-  return(gradient)
+  return(xi_by_theta)
 }
+xi_by_theta_example3 <- find_xi_by_theta(theta_example3)
+
+gmm_example3 <- gmm_moment(theta_example3)
+G_example3 <- t(Z) %*% xi_by_theta_example3 / (J_product * T_market)
+gradient_analytic <- 2 * t(G_example3) %*% W %*% gmm_example3$g
+print(gradient_analytic)
 
 ## Question 3(d)
-
-epsilon <- 1e-4
+epsilon <- 1e-6
 theta_example3_case1 <- c(-0.5+epsilon, 2, 2)
 theta_example3_case2 <- c(-0.5, 2+epsilon, 2)
 theta_example3_case3 <- c(-0.5, 2, 2+epsilon)
 
-start_time <- proc.time()
-moment_example_case1 <- gmm_moment(theta_example3_case1)
-moment_example_case2 <- gmm_moment(theta_example3_case2)
-moment_example_case3 <- gmm_moment(theta_example3_case3)
-end_time <- proc.time()
-print(end_time - start_time)
+gmm_example_case1 <- gmm_moment(theta_example3_case1)
+gmm_example_case2 <- gmm_moment(theta_example3_case2)
+gmm_example_case3 <- gmm_moment(theta_example3_case3)
 
-gradient <- c((moment_example_case1 - moment_example)/epsilon, (moment_example_case2 - moment_example)/epsilon, (moment_example_case3 - moment_example)/epsilon)
+gradient <- c((gmm_example_case1$value - gmm_example3$value)/epsilon, (gmm_example_case2$value - gmm_example3$value)/epsilon, (gmm_example_case3$value - gmm_example3$value)/epsilon)
+print(gradient)
 
 ## Question 3(e)
-start_time <- proc.time()
 theta_hat <- optim(c(0,0,0), gmm_moment, method = "BFGS")
 final_delta_hat <- foreach(tau = 1:T_market, .combine = 'c', .packages = 'data.table') %dopar% {
   delta_hat_t <- find_delta(rep(0,50), product_dataset[t==tau, market_share], theta_hat$par, consumer_sample, tau, 10000, 1e-6)
   delta_hat_t
 }
 lambda_hat <- solve(t(X) %*% Z %*% W %*% t(Z) %*% X) %*% t(X) %*% Z %*% W %*% t(Z) %*% final_delta_hat
-end_time <- proc.time()
-print(end_time - start_time)
-## It takes 6-7 hours to process
-## Final result: (-1.48, -.867, .528, .423; .086, .980, .901)
+print(c(theta_hat$par, lambda_hat))
 
+## Stop parallel computing
 stopCluster(cl)
-
